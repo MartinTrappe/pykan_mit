@@ -1,0 +1,18 @@
+{
+    "project_name": "KAN_from_Scratch",
+    "layer_dims": [2, 2, 1],
+    "grid_size": 30,
+    "spline_degree": 3,
+    "learning_rate": 0.001,
+    "num_steps": 1000,
+    "dataset_size": 1000,
+    "log_interval": 100,
+    "use_regularization": true,
+    "l1_weight": 0.0001,
+    "entropy_weight": 0.02,
+    "update_strategy": "fixed",
+    "adaptive_k": 5,
+    "adaptive_patience": 100,
+    "adaptive_threshold": 0.05,
+    "fixed_update_interval": 10000
+}
