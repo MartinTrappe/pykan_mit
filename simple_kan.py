@@ -44,82 +44,26 @@ class SimpleKAN(nn.Module):
 
     @torch.no_grad()
     def update_grids(self, x: torch.Tensor, k: int = 1):
+        """
+        Update knot grids layer by layer using the actual inputs each layer sees.
+        Respects a global lock (self.lock_grids) and per-layer locks (layer.lock_grids).
+        """
+        if getattr(self, "lock_grids", False):
+            return
+
         current_input = x
         for layer in self.layers:
-            if hasattr(layer, 'update_grid'):
-                layer.update_grid(current_input, k=k)
-            # Pass the *output* of the layer (without activations) to the next
-            current_input, _ = layer(current_input)
+            if getattr(layer, "lock_grids", False):
+                # still propagate to next layer
+                out, _ = layer(current_input)
+                current_input = out
+                continue
 
-# # file: simple_kan.py
-#
-# import torch
-# import torch.nn as nn
-# from adaptive_kan_layer import AdaptiveKANLayer
-# from typing import List
-#
-# class SimpleKAN(nn.Module):
-#     """
-#     A simple KAN model composed of a sequence of KAN layers.
-#
-#     Attributes:
-#         layers (nn.ModuleList): A list of the AdaptiveKANLayer modules in the network.
-#     """
-#     def __init__(self, layer_dims: List[int], grid_size: int = 5, spline_degree: int = 3):
-#         """
-#         Initializes the SimpleKAN model.
-#
-#         Args:
-#             layer_dims (List[int]): A list of integers specifying the dimensions of each layer.
-#                                     For example, [2, 5, 1] would create a KAN with an input
-#                                     dimension of 2, one hidden layer of 5 neurons, and an
-#                                     output dimension of 1.
-#             grid_size (int): The number of grid intervals for the splines in each layer.
-#             spline_degree (int): The degree of the B-splines in each layer.
-#         """
-#         super().__init__()
-#
-#         if len(layer_dims) < 2:
-#             raise ValueError("layer_dims must have at least 2 elements (input and output dim).")
-#
-#         self.layers = nn.ModuleList()
-#         for i in range(len(layer_dims) - 1):
-#             in_dim = layer_dims[i]
-#             out_dim = layer_dims[i+1]
-#             self.layers.append(
-#                 AdaptiveKANLayer(
-#                     in_dim=in_dim,
-#                     out_dim=out_dim,
-#                     grid_size=grid_size,
-#                     spline_degree=spline_degree
-#                 )
-#             )
-#
-#     def forward(self, x: torch.Tensor) -> torch.Tensor:
-#         """
-#         Forward pass for the entire KAN model.
-#
-#         Args:
-#             x (torch.Tensor): Input tensor of shape (batch_size, input_dim).
-#
-#         Returns:
-#             torch.Tensor: Output tensor from the final layer.
-#         """
-#         for layer in self.layers:
-#             x = layer(x)
-#         return x
-#
-#     @torch.no_grad()
-#     def update_grids(self, x):
-#         """Calls update_grid on each layer of the network."""
-#         # --- FIX START HERE ---
-#
-#         current_input = x
-#         for layer in self.layers:
-#             # The grid update for a layer must be based on its specific inputs
-#             if hasattr(layer, 'update_grid'):
-#                 layer.update_grid(current_input)
-#
-#             # The output of this layer becomes the input for the next
-#             current_input = layer(current_input)
-#
+            if hasattr(layer, "update_grid"):
+                layer.update_grid(current_input, k=k)
+
+            # propagate to next layer (expects layer to return (out, activations))
+            out, _ = layer(current_input)
+            current_input = out
+
+

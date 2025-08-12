@@ -49,7 +49,8 @@ class AdaptiveTrigger:
 
 def get_target_function():
     """Returns the mathematical function we want to learn."""
-    return lambda x: torch.exp(torch.sin(torch.pi * x[:, 0]) + x[:, 1]**2)
+    return lambda x: (x[:, 0]**2 + x[:, 1]**2)
+    #return lambda x: torch.exp(torch.sin(torch.pi * x[:, 0]) + x[:, 1]**2)
 
 def backup_source_code(data_dir):
     """Backs up all files in the script's directory for reproducibility."""
@@ -69,43 +70,100 @@ def train_model(config, data_dir):
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Using device: {DEVICE}")
     logging.info(f"Configuration: {json.dumps(config, indent=4)}")
+
+    # --- data ---
     target_function = get_target_function()
     train_inputs = torch.rand(config["dataset_size"], 2, device=DEVICE) * 2 - 1
     train_labels = target_function(train_inputs).unsqueeze(1)
-    model = SimpleKAN(layer_dims=config["layer_dims"], grid_size=config["grid_size"], spline_degree=config["spline_degree"]).to(DEVICE)
+
+    # persist copies for the polish phase
+    Path(data_dir).mkdir(parents=True, exist_ok=True)
+    torch.save(train_inputs.detach().cpu(), Path(data_dir) / "train_inputs.pt")
+    torch.save(train_labels.detach().cpu(), Path(data_dir) / "train_labels.pt")
+
+    # --- model & opt ---
+    model = SimpleKAN(
+        layer_dims=config["layer_dims"],
+        grid_size=config["grid_size"],
+        spline_degree=config["spline_degree"]
+    ).to(DEVICE)
     loss_fn = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
-    adaptive_trigger = AdaptiveTrigger(patience=config["adaptive_patience"], threshold=config["adaptive_threshold"])
+    optimizer = optim.Adam(model.parameters(), lr=float(config.get("learning_rate", 1e-3)))
+
+    # --- Grid-update strategy: "adaptive" | "fixed" | "none" ---
+    update_strategy = str(config.get("update_strategy", "fixed")).lower()
+    if update_strategy not in {"adaptive", "fixed", "none"}:
+        raise ValueError(f"update_strategy must be one of 'adaptive','fixed','none' (got {update_strategy!r})")
+
+    cutoff_frac = float(config.get("grid_update_cutoff_frac", 0.5))  # early phase = first half by default
+    update_phase_end = int(config["num_steps"] * cutoff_frac)
+
+    adaptive_trigger = (
+        AdaptiveTrigger(
+            patience=int(config.get("adaptive_patience", 50)),
+            threshold=float(config.get("adaptive_threshold", 1e-3))
+        )
+        if update_strategy == "adaptive" else None
+    )
+
+    logging.info(
+        f"Grid updates: strategy={update_strategy}, cutoff={update_phase_end} steps, "
+        f"k={int(config.get('adaptive_k', 1))}"
+    )
+
+    # --- train ---
     all_losses = []
     for step in range(config["num_steps"]):
         model.train()
         predictions, activations = model(train_inputs, return_activations=True)
         main_loss = loss_fn(predictions, train_labels)
         total_loss = main_loss
-        if config["use_regularization"]:
+
+        if bool(config.get("use_regularization", False)):
             l1_loss, entropy_loss = model.regularization_loss(activations)
-            total_loss = main_loss + config["l1_weight"] * l1_loss + config["entropy_weight"] * entropy_loss
-        optimizer.zero_grad(); total_loss.backward(); optimizer.step()
-        all_losses.append(main_loss.item())
-        if step < config["num_steps"] // 2:
+            total_loss = (
+                main_loss
+                + float(config.get("l1_weight", 0.0)) * l1_loss
+                + float(config.get("entropy_weight", 0.0)) * entropy_loss
+            )
+
+        optimizer.zero_grad(set_to_none=True)
+        total_loss.backward()
+        optimizer.step()
+
+        all_losses.append(float(main_loss.item()))
+
+        # --- grid updates (optional) ---
+        if update_strategy != "none" and step < update_phase_end:
             trigger_update = False
-            if config["update_strategy"] == "adaptive" and adaptive_trigger.check(main_loss.item()):
+            if update_strategy == "adaptive" and adaptive_trigger and adaptive_trigger.check(float(main_loss.item())):
                 trigger_update = True
-            elif config["update_strategy"] == "fixed" and step > 0 and step % config["fixed_update_interval"] == 0:
+            elif update_strategy == "fixed" and step > 0 and step % int(config.get("fixed_update_interval", 100)) == 0:
                 logging.info(f"--- Fixed Trigger: Step {step}. Updating grid. ---")
                 trigger_update = True
+
             if trigger_update:
-                model.update_grids(train_inputs, k=config["adaptive_k"])
-                optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
-        if step % config["log_interval"] == 0 or step == config["num_steps"] - 1:
-            logging.info(f"Step {step:>5}/{config['num_steps']}: Main Loss={main_loss:.4f}")
-    # Save Loss Plot
-    fig_loss = plt.figure(figsize=(10, 6)); plt.plot(all_losses); plt.title("Main MSE Loss Over Steps")
-    plt.xlabel("Training Step"); plt.ylabel("MSE Loss"); plt.yscale('log'); plt.grid(True)
-    loss_plot_path = os.path.join(data_dir, 'mse_loss_plot.pdf')
-    plt.savefig(loss_plot_path, format='pdf', bbox_inches='tight'); plt.close(fig_loss)
+                model.update_grids(train_inputs, k=int(config.get("adaptive_k", 1)))
+                optimizer = optim.Adam(model.parameters(), lr=float(config.get("learning_rate", 1e-3)))
+
+        if step % int(config.get("log_interval", 100)) == 0 or step == config["num_steps"] - 1:
+            logging.info(f"Step {step:5d}/{config['num_steps']}: Main Loss={main_loss.item():.4f}")
+
+    # --- save loss plot ---
+    fig_loss = plt.figure(figsize=(10, 6))
+    plt.plot(all_losses)
+    plt.title("Main MSE Loss Over Steps")
+    plt.xlabel("Training Step")
+    plt.ylabel("MSE Loss")
+    plt.yscale("log")
+    plt.grid(True)
+    loss_plot_path = os.path.join(data_dir, "mse_loss_plot.pdf")
+    plt.savefig(loss_plot_path, format="pdf", bbox_inches="tight")
+    plt.close(fig_loss)
     logging.info(f"Saved loss plot to {loss_plot_path}")
+
     return model
+
 
 def create_visualizations(model, data_dir):
     """Generates 2D activation plots."""
@@ -217,9 +275,6 @@ def run_kan_pipeline(config, data_dir):
     backup_source_code(data_dir)
 
     # 2. Run the Full Training
-    logging.info(f"Starting KAN (mit) interpolation pipeline...")
-    start_time = time.time()
-
     model = train_model(config, data_dir)
 
     # 3. Save Final Model and Configuration
@@ -237,14 +292,13 @@ def run_kan_pipeline(config, data_dir):
     create_visualizations(model, data_dir)
     create_3d_surface_plots(model, config, data_dir)
 
-    total_time = time.time() - start_time
-    logging.info(f"\n--- KAN (mit) Pipeline Complete ---")
-    logging.info(f"Total execution time: {total_time:.2f} seconds.")
-    logging.info(f"All outputs, logs, and backups are in: {data_dir}")
     return model
 
 def main(args):
     """Main execution function."""
+
+    start_time = time.perf_counter()
+    time_tag = time.perf_counter()
 
     # ===== BEGIN SETUP =====
     timestamp = time.strftime('%Y%m%d-%H%M%S')
@@ -276,28 +330,95 @@ def main(args):
         logging.error(f"FATAL: Could not decode JSON from '{config_path}'. Please check its format.")
         sys.exit(1)
 
+    setup_time = time.perf_counter() - time_tag
+    logging.info(f"setup_time: {int(setup_time)} seconds.")
+    logging.info(f"All outputs, logs, and backups are in: {log_dir}")
+
     # ===== RUN THE ACTIVE PIPELINE =====
-    # The pipeline now returns the trained model
-    final_model = run_kan_pipeline(config, log_dir)
+    # 0) The pipeline returns the trained model (and has saved train_* tensors to log_dir)
+    time_tag = time.perf_counter()
+    logging.info(f"\n--- Start KAN Pipeline ---")
+    model = run_kan_pipeline(config, log_dir)
+    kan_pipeline_time = time.perf_counter() - time_tag
+    logging.info(f"\n--- KAN Pipeline done ---")
+    logging.info(f"kan_pipeline_time: {int(kan_pipeline_time)} seconds.")
 
-    # --- Final Test Call at the End of the Script ---
-    if final_model:
-        logging.info("\n--- Performing Final Model Call (End of Script) ---")
-        # Set the model to evaluation mode
-        final_model.eval()
+    # 1) Load the saved training tensors for the polish pass
+    time_tag = time.perf_counter()
+    try:
+        train_inputs = torch.load(log_dir / "train_inputs.pt")
+        train_labels = torch.load(log_dir / "train_labels.pt")
+    except FileNotFoundError as e:
+        logging.error("Expected training tensors not found in %s. Did training finish writing them?", str(log_dir))
+        raise
+    from symbolify import (
+        prune_edges,
+        symbolify_model,
+        attach_freeze_hooks,
+        set_lock_grids,
+        fine_tune_after_symbolify,
+    )
+    loading_time = time.perf_counter() - time_tag
+    logging.info(f"loading_time: {int(loading_time)} seconds.")
 
-        # Get the device the model is on
-        device = next(final_model.parameters()).device
+    # 2) Prune tiny edges (pre-symbolify), from config
+    time_tag = time.perf_counter()
+    pre_prune_rel = float(config.get("prune_rel_thresh", 0.02))
+    if pre_prune_rel > 0.0:
+        prune_report = prune_edges(model, rel_thresh=pre_prune_rel, freeze=True)
+        logging.info("Pruned %d / %d edges (pre-symbolify).", prune_report["pruned"], prune_report["total_edges"])
+    else:
+        logging.info("Pre-symbolify pruning disabled (prune_rel_thresh <= 0).")
+    pruning_time = time.perf_counter() - time_tag
+    logging.info(f"pruning_time: {int(pruning_time)} seconds.")
 
-        # Create a test input tensor
-        test_input = torch.tensor([[0.5, 0.5]], device=device)
+    # 3) First symbolify pass (params from config)
+    time_tag = time.perf_counter()
+    sym_r2 = float(config.get("symbolify_r2_threshold", 0.995))
+    sym_n = int(config.get("symbolify_samples_per_edge", 400))
+    symbolic_report = symbolify_model(
+        model,
+        r2_threshold=sym_r2,
+        replace=True,
+        freeze=bool(config.get("freeze_after_symbolify", True)),
+        out_json_path=str(log_dir / "symbolic_map_initial.json"),
+        samples_per_edge=sym_n,
+    )
+    symbolify_time = time.perf_counter() - time_tag
+    logging.info(f"symbolify_time: {int(symbolify_time)} seconds.")
 
-        # Call the model to get a prediction
-        with torch.no_grad():
-            prediction, _ = final_model(test_input, return_activations=True)
+    # 4) Optional polish (fine-tune) stage
+    time_tag = time.perf_counter()
+    # Freeze grads on replaced edges and stop all knot motion if requested
+    attach_freeze_hooks(model)
+    if bool(config.get("lock_grids_after_symbolify", True)):
+        set_lock_grids(model, lock=True)
+\
+    if bool(config.get("ft_enabled", True)):
+        ft_reports = fine_tune_after_symbolify(
+            model,
+            train_inputs,
+            train_labels,
+            config,             # pass the whole config dict
+            str(log_dir)
+        )
+        logging.info("Polish complete. Wrote:")
+        logging.info("  - %s", log_dir / "pykan_mit_model_after_ft.pth")
+        if ft_reports.get("prune_report") is not None:
+            logging.info("  - %s", log_dir / "prune_report_after_ft.json")
+        if ft_reports.get("symbolic_report2") is not None:
+            logging.info("  - %s", log_dir / "symbolic_map_final.json")
+    else:
+        logging.info("Polish (fine-tune) phase disabled by config.")
+    polish_time = time.perf_counter() - time_tag
+    logging.info(f"polish_time: {int(polish_time)} seconds.")
 
-        logging.info(f"Test Input: {test_input.cpu().numpy().flatten()}")
-        logging.info(f"Final Model Prediction: {prediction.item():.4f}")
+
+    # Total wall time
+    total_time = time.perf_counter() - start_time
+    logging.info(f"total_time: {int(total_time)} seconds.")
+
+
 
 
     # ===== BEGIN CREATE KAN (pykan library) [PRESERVED & DISABLED] =====

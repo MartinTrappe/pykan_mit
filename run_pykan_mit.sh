@@ -45,11 +45,13 @@ fi
 # activate the virtual environment
 source "$VENV_DIR/bin/activate"
 
+PYTHON_BIN="$VENV_DIR/bin/python"
+
 # upgrade installer tools
-python -m pip install --upgrade pip setuptools wheel
+$PYTHON_BIN -m pip install --upgrade pip setuptools wheel
 
 # install core dependencies
-python -m pip install numpy matplotlib pandas scipy torch scikit-learn pyyaml tqdm notebook
+$PYTHON_BIN -m pip install numpy matplotlib pandas scipy torch scikit-learn pyyaml tqdm notebook
 
 # ——— NEW: vendor pykan source by cloning & symlinking ———
 VENDOR_DIR="$SCRIPT_DIR/vendor/pykan"
@@ -83,7 +85,7 @@ echo ""
 echo "--- Running Test Prediction ---"
 
 # Read the latest run directory from the JSON file
-LATEST_RUN_DIR=$(python -c "import json; print(json.load(open('latest_run.json'))['latest_run_dir'])")
+LATEST_RUN_DIR=$("$VENV_DIR/bin/python" -c "import json; print(json.load(open('latest_run.json'))['latest_run_dir'])")
 
 if [ -z "$LATEST_RUN_DIR" ]; then
     echo "Error: Could not read the latest run directory from latest_run.json. Exiting." >&2

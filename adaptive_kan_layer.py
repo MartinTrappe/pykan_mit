@@ -65,8 +65,24 @@ class AdaptiveKANLayer(nn.Module):
     # --- update_grid and resize_spline_coeffs are the same ---
     @torch.no_grad()
     def update_grid(self, x: torch.Tensor, k: int = 1):
+        """
+        Refine per-input grids based on the current layer inputs x.
+        Honors:
+          - self.lock_grids: skip all updates if True
+          - self.freeze_mask: skip inputs whose outgoing edges are fully frozen
+        """
+        if getattr(self, "lock_grids", False):
+            return
+
         updated_grids = []
         for i in range(self.in_dim):
+            # if all outgoing edges from this input are frozen, skip moving its knots
+            if hasattr(self, "freeze_mask"):
+                # freeze_mask shape: [in_dim, out_dim, n_basis]; 0 means frozen
+                if float(self.freeze_mask[i].abs().sum()) == 0.0:
+                    updated_grids.append(self.grids[i])
+                    continue
+
             feature_data = x[:, i]
             hist = torch.histc(feature_data, bins=self.grid_size, min=-1, max=1)
             top_k_indices = torch.topk(hist, k).indices
@@ -74,9 +90,11 @@ class AdaptiveKANLayer(nn.Module):
             new_knots = -1.0 + (top_k_indices.float() + 0.5) * bin_width
             updated_grid = torch.cat([self.grids[i], new_knots.to(self.grids.device)]).sort().values
             updated_grids.append(updated_grid)
+
         self.grids = torch.stack(updated_grids, dim=0)
         self.grid_size += k
         self.resize_spline_coeffs()
+
 
     @torch.no_grad()
     def resize_spline_coeffs(self):
