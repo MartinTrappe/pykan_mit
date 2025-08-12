@@ -6,6 +6,7 @@ This project contains a complete, from-scratch implementation of a **Kolmogorov-
 
 ## Features ✨
 
+* **Symbolic Expression Extraction**: Approximate data by learning composites of elementary functions that fit the data.
 * **Custom B-Spline Activations**: Core activation functions are built from the ground up using B-splines.
 * **Fully Configurable Architecture**: Easily define deep KANs with arbitrary layer widths (e.g., `[2, 4, 8, 4, 1]`) in a simple configuration file.
 * **Adaptive Grid Refinement**: The spline grids automatically increase their resolution in "interesting" regions of the function, improving accuracy efficiently. The update trigger can be set to a fixed interval or a learning plateau detector.
